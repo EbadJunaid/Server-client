@@ -7,34 +7,337 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include<stdbool.h>
+#include<magic.h>
+#include<zlib.h>
+#include"encode(compression).h"
+
+
 
 #define PORT 8080
-#define BUFFER_SIZE 1024
+#define BUFFER_SIZE 32768 // almost 32kb
 #define SERVER_PORT 8080
+#define CHUNK 131072  // Larger chunk size (256KB)
+
+
+// below 3 function tells me which file type(image,video or normal file ) so that I can run the specialized compresssion algorithm
+
+int is_image(const char *file_type)
+{
+    return (strstr(file_type, "image/") != NULL);
+}
+
+
+// Function to check if the file is a video
+int is_video(const char *file_type)
+{
+    return (strstr(file_type, "video/") != NULL);
+}
+
+
+
+int file_type(const char* filename)
+{
+    magic_t magic;
+
+    // Initialize magic library
+    magic = magic_open(MAGIC_MIME_TYPE); // MIME type detection
+    if (magic == NULL)
+    {
+        printf("Error: Could not initialize magic library\n");
+        return 1;
+    }
+
+    //const char* magic_db ="C:\\Users\\bilal\\vcpkg\\installed\\x64-windows\\share\\libmagic\\misc\\magic.mgc";
+
+    // Load the default magic database
+    if (magic_load(magic, NULL) != 0)
+    {
+        printf("Error: Could not load magic database - %s\n", magic_error(magic));
+        magic_close(magic);
+        return 1;
+    }
+
+    // Get MIME type of the file
+    const char *file_type = magic_file(magic, filename);
+    // if (file_type == NULL) {
+    //     printf("Error: Could not determine file type - %s\n", magic_error(magic));
+    //     magic_close(magic);
+    //     return 1; // 
+    // }
+
+    printf("File type: %s\n", file_type);
+
+    // Check if it's an image
+    if (is_image(file_type)) {
+        printf("The file is an image.\n");
+        magic_close(magic);
+        return 1;
+    }
+    // Check if it's a video
+    else if (is_video(file_type)) {
+        printf("The file is a video.\n");
+        magic_close(magic);
+        return 2;
+    }
+    // If not an image or video
+    else {
+        printf("The file is neither an image nor a video.\n");
+        magic_close(magic);
+        return 3;
+    }
+    
+}
+
+
+
+
+// below is the zlib compression algorithm which works very fine for normal files 
+
+int compress_file(const char *source, const char *destination,size_t* compressed_size)
+{
+    FILE *sourceFile = fopen(source, "rb");
+    if (!sourceFile) {
+        perror("Source file error");
+        return -1;
+    }
+
+    FILE *destFile = fopen(destination, "wb");
+    if (!destFile) {
+        perror("Destination file error");
+        fclose(sourceFile);
+        return -1;
+    }
+
+    unsigned char *in = (unsigned char *)malloc(CHUNK);
+    unsigned char *out = (unsigned char *)malloc(CHUNK);
+    if (in == NULL || out == NULL) {
+        fprintf(stderr, "Memory allocation failed\n");
+        fclose(sourceFile);
+        fclose(destFile);
+        return -1;
+    }
+
+    z_stream strm = {0};
+    if (deflateInit(&strm, Z_DEFAULT_COMPRESSION) != Z_OK) {
+        fprintf(stderr, "deflateInit failed\n");
+        free(in);
+        free(out);
+        fclose(sourceFile);
+        fclose(destFile);
+        return -1;
+    }
+
+    int flush;
+    size_t bytesRead;
+    do {
+        bytesRead = fread(in, 1, CHUNK, sourceFile);
+        if (ferror(sourceFile)) {
+            deflateEnd(&strm);
+            free(in);
+            free(out);
+            fclose(sourceFile);
+            fclose(destFile);
+            return -1;
+        }
+        flush = feof(sourceFile) ? Z_FINISH : Z_NO_FLUSH;
+
+        strm.avail_in = bytesRead;
+        strm.next_in = in;
+
+        do {
+            strm.avail_out = CHUNK;
+            strm.next_out = out;
+            deflate(&strm, flush);
+            size_t bytesWritten = CHUNK - strm.avail_out;
+            fwrite(out, 1, bytesWritten, destFile);
+        } while (strm.avail_out == 0);
+
+    } while (flush != Z_FINISH);
+
+    deflateEnd(&strm);
+    free(in);
+    free(out);
+    fclose(sourceFile);
+
+    // calculating the file size of the compressed file and sends to the main
+    fseek(destFile, 0, SEEK_END);
+    *compressed_size = ftell(destFile);
+    fseek(destFile, 0, SEEK_SET);
+
+
+    fclose(destFile);
+
+    return 0;
+}
+
+
+int decompress_file(const char *source, const char *destination) {
+    FILE *sourceFile = fopen(source, "rb");
+    if (!sourceFile) {
+        perror("Source file error");
+        return -1;
+    }
+
+    FILE *destFile = fopen(destination, "wb");
+    if (!destFile) {
+        perror("Destination file error");
+        fclose(sourceFile);
+        return -1;
+    }
+
+    unsigned char *in = (unsigned char *)malloc(CHUNK);
+    unsigned char *out = (unsigned char *)malloc(CHUNK);
+    if (in == NULL || out == NULL) {
+        fprintf(stderr, "Memory allocation failed\n");
+        fclose(sourceFile);
+        fclose(destFile);
+        return -1;
+    }
+
+    z_stream strm = {0};
+    if (inflateInit(&strm) != Z_OK) {
+        fprintf(stderr, "inflateInit failed\n");
+        free(in);
+        free(out);
+        fclose(sourceFile);
+        fclose(destFile);
+        return -1;
+    }
+
+    int ret;
+    size_t bytesRead;
+    do {
+        bytesRead = fread(in, 1, CHUNK, sourceFile);
+        if (ferror(sourceFile)) {
+            inflateEnd(&strm);
+            free(in);
+            free(out);
+            fclose(sourceFile);
+            fclose(destFile);
+            return -1;
+        }
+
+        strm.avail_in = bytesRead;
+        strm.next_in = in;
+
+        do {
+            strm.avail_out = CHUNK;
+            strm.next_out = out;
+
+            ret = inflate(&strm, Z_NO_FLUSH);
+            if (ret == Z_STREAM_ERROR) {
+                inflateEnd(&strm);
+                free(in);
+                free(out);
+                fclose(sourceFile);
+                fclose(destFile);
+                return -1;
+            }
+
+            if (ret == Z_DATA_ERROR || ret == Z_MEM_ERROR) {
+                fprintf(stderr, "Decompression error: %d\n", ret);
+                inflateEnd(&strm);
+                free(in);
+                free(out);
+                fclose(sourceFile);
+                fclose(destFile);
+                return -1;
+            }
+
+            size_t bytesWritten = CHUNK - strm.avail_out;
+            fwrite(out, 1, bytesWritten, destFile);
+
+        } while (strm.avail_out == 0);
+
+    } while (ret != Z_STREAM_END);
+
+    inflateEnd(&strm);
+    free(in);
+    free(out);
+    fclose(sourceFile);
+    fclose(destFile);
+
+    return ret == Z_STREAM_END ? 0 : -1;
+}
+
+
+
+
+
+
+
+
+
 
 
 // Function to send file contents to the server (for uploads)
-void send_file_contents(int socket, const char *file_path) 
+void send_file_contents(int socket, const char *file_path,int file_size) 
 {
-    FILE *file = fopen(file_path, "r");
+    FILE *file = fopen(file_path, "rb");
     if (file == NULL) {
-        perror("Error opening file for upload");
+        perror("Error opening file for download");
         return;
     }
 
     char file_buffer[BUFFER_SIZE];
-    memset(file_buffer,0,BUFFER_SIZE);
+    memset(file_buffer, 0, BUFFER_SIZE);
     size_t bytes_read;
 
+    char ack_msg[14] = {0};
+
     // Read file in chunks and send it to the server
-    while ((bytes_read = fread(file_buffer, sizeof(char), BUFFER_SIZE, file)) > 0) {
-        send(socket, file_buffer, bytes_read, 0);
+    printf("In the send_file_contents in server\n");
+    int total_sending_bytes = 0;
+    while ((bytes_read = fread(file_buffer, sizeof(char), BUFFER_SIZE, file)) > 0)
+    {
+        int bytes_send = send(socket, file_buffer, bytes_read, 0);
+        if(bytes_send < BUFFER_SIZE)
+        {
+            usleep(10000);// IN MILLISECONDS 
+            send(socket,"ENDING THE FILE",3,0);
+        }
+        if (bytes_send < 0)
+        {
+            perror("Error sending data");
+            fclose(file);
+            return;
+        }
+        printf("Bytes_send is : %i \n",bytes_send);
+
+        recv(socket,ack_msg,sizeof(ack_msg),0);
+
+        if (ack_msg <= 0 || strncmp(ack_msg,"chunk received", 14) != 0)
+        {
+            // If ACK not received, resend the chunk
+            fseek(file, -bytes_read, SEEK_CUR);  // Go back to resend the same chunk
+            printf("Incomplete chuck sported \n");
+        }
+        else
+        {
+            printf("Chunk sent successfully\n");
+        }
+
+        total_sending_bytes += bytes_send;
+        if(total_sending_bytes == file_size)
+        {
+            printf("Full file is sended succesffuly\n");
+        }
         memset(file_buffer, 0, BUFFER_SIZE);  // Clear the buffer
     }
+    //printf("%c",'b');
 
     fclose(file);
-    // After sending the file, send the "END" signal to mark completion
-    //send(socket, "END", 3, 0);
+
+    if(total_sending_bytes == file_size)
+    {
+        printf("Full file is sended succesffuly and loop is terminated\n");
+    }
+
+
+    if(total_sending_bytes != file_size)
+    {
+        printf("Full file is not sended \n");
+    }
 }
 
 
@@ -50,15 +353,6 @@ void handling_command(int socket, const char *command)
     char buffer[BUFFER_SIZE];
     memset(buffer,0,BUFFER_SIZE);
 
-    // // Send the full command to the server 
-    // send(socket, command, strlen(command), 0);
-
-    
-    // // Wait for the verification msg from the server that it receives the command or not :
-    // recv(socket,buffer,sizeof(buffer),0);
-    // printf("%s \n",buffer);
-
-    //Now sending of the command is done 
 
     if (strncmp(command, "$UPLOAD$", 8) == 0)
     {
@@ -71,33 +365,46 @@ void handling_command(int socket, const char *command)
             return;
         }
 
+
+        char new_command[512]; // Ensure this is large enough
+        char *dot = strrchr(file_path, '.'); // Find the last dot in the filename
+        if (dot != NULL) {
+            // If there is an extension
+            snprintf(new_command, sizeof(new_command), "$UPLOAD$%.*s-compressed%s", 
+                    (int)(dot - file_path), file_path, dot);
+        } else {
+            // If there is no extension, just append '-compressed'
+            snprintf(new_command, sizeof(new_command), "$UPLOAD$%s-compressed", file_path);
+        }
+
+
+
         
         // Send the full command to the server 
-        send(socket, command, strlen(command), 0);
+        send(socket, new_command, strlen(new_command), 0);
 
     
         // Wait for the verification msg from the server that it receives the command or not :
+        memset(buffer,0,BUFFER_SIZE);
         recv(socket,buffer,sizeof(buffer),0);
         printf("%s \n",buffer);
         
 
-        // send(socket, command, strlen(command), 0);  // Send the upload command with the file path
-        // read(socket, buffer, BUFFER_SIZE);     // Wait for server response about command receiving
-        //printf("%s\n", buffer);
-
+       
 
         // Calculate the file size
         fseek(file, 0, SEEK_END);
-        int file_size = ftell(file);
+        size_t file_size = ftell(file);
         fseek(file, 0, SEEK_SET);
 
         fclose(file);
 
+
        
         send(socket,&file_size,sizeof(file_size),0);
-        read(socket, buffer, BUFFER_SIZE); // Wait for server to get the size of the file 
+        read(socket, buffer, BUFFER_SIZE); // Wait for server to get the original size of the file 
         memset(buffer,0,BUFFER_SIZE);
-        read(socket,buffer,BUFFER_SIZE);
+        read(socket,buffer,BUFFER_SIZE);// Waiting for the server that the memory for the file is available or not
 
 
         if(strncmp(buffer, "Memory full!", 11) == 0)
@@ -106,10 +413,58 @@ void handling_command(int socket, const char *command)
             return;
         }
 
-        send_file_contents(socket, file_path);
+
+         // Finding the type of the file(image,video,normal)
+
+        int type = file_type(file_path);
+        send(socket, &type, sizeof(type), 0);
+        recv(socket, buffer, BUFFER_SIZE, 0); // Wait for server to get the type of the file
+        memset(buffer, 0, BUFFER_SIZE);
+
+
+
+        char* compressed_file = new_command + 8;
+
+        size_t compressed_size = 0;
+
+        if(type == 1)
+        {   
+            printf("It is an image but algorithm is not available \n");
+            //compress_file(file_path,compressed_file,&compressed_size);
+            base64_encode_file(file_path,compressed_file,&compressed_size);
+            printf("File compressed successfully.\n");
+        }
+
+        else if(type == 2)
+        {   
+            printf("It is a video but algorithm is not available \n");
+            //compress_file(file_path,compressed_file,&compressed_size);
+            base64_encode_file(file_path,compressed_file,&compressed_size);
+            printf("File compressed successfully.\n");
+        }
+
+        else
+        {   
+            //compress_file(file_path,compressed_file,&compressed_size);
+            base64_encode_file(file_path,compressed_file,&compressed_size);
+            printf("File compressed successfully.\n");
+        }
+
+
+
+        // the compresion function gives the size of the compressed file now we just send it to the server:
+        send(socket, &compressed_size, sizeof(compressed_size), 0);
+        recv(socket, buffer, BUFFER_SIZE, 0); 
+        memset(buffer, 0, BUFFER_SIZE);
+
+
+
+
+        send_file_contents(socket, compressed_file,compressed_size);
         memset(buffer,0,BUFFER_SIZE);
         read(socket, buffer, BUFFER_SIZE);     // Wait for server response about file update
         printf("Server response: %s\n", buffer);
+        remove(compressed_file);
 
         //printf("Upload \n");
 
@@ -117,110 +472,181 @@ void handling_command(int socket, const char *command)
 
     else if(strncmp(command, "$DOWNLOAD$", 10) == 0)
     {
-
-        // Send the full command to the server 
+        // Send the full command to the server
         send(socket, command, strlen(command), 0);
 
-    
-        // Wait for the verification msg from the server that it receives the command or not :
-        recv(socket,buffer,sizeof(buffer),0);
-        printf("%s \n",buffer);
+        // Wait for the verification msg from the server
+        recv(socket, buffer,BUFFER_SIZE, 0);
+        printf("%s \n", buffer);
 
-
-        // Waiting for server resposne that the file exists or not :
+        // Waiting for server response that the file exists or not
         int rec = 0;
-        memset(buffer,0,BUFFER_SIZE);
-        rec = recv(socket, buffer,BUFFER_SIZE, 0);
+        memset(buffer, 0, BUFFER_SIZE);
+        rec = recv(socket, buffer, BUFFER_SIZE, 0);
 
-        if(rec <= 0)
-        {
-            printf("Issue with receiving bytes : ");
+        if (rec <= 0) {
+            printf("Issue with receiving bytes: ");
         }
 
-        if(strncmp(buffer, "File does not exist\n", 21) == 0)
-        {
+        if (strncmp(buffer, "File does not exist\n", 21) == 0) {
             printf("Server response: %s\n", buffer);
             return;
         }
 
-        send(socket,"I got it that files exists\n",27,0);
+        send(socket, "I got it that file exists\n", 27, 0);
 
-        // Now waiting for the file size :
+        // Now waiting for the file type(image,video or some random file)
 
+        int file_type = 0;
+        recv(socket,&file_type,sizeof(file_type),0);
+        send(socket,"File type getted successfully\n",30,0);
+
+
+
+
+        // Now waiting for the file size
         size_t file_size = 0;
         recv(socket, &file_size, sizeof(file_size), 0);
-        send(socket,"File size is received\n",22,0);
+        send(socket, "File size is received\n", 22, 0);
         printf("After getting the file size\n");
 
-        memset(buffer,0,BUFFER_SIZE);    
+        memset(buffer, 0, BUFFER_SIZE);
 
-        // Now receiving the contents of the file :
-
+        // Now receiving the contents of the file
         char file_name[128] = {0};
         sscanf(command + 10, "%s", file_name);
 
         char file_dest[128] = {0};
-        sprintf(file_dest, "%s/%s","/home/ebad/Downloads/down", file_name); // Extract file name
+        //sprintf(file_dest, "/home/ebad/Downloads/down%s", file_name); // Change this to a valid Windows path
+        sprintf(file_dest, "%s%s%s","/home/ebad/Downloads/down/", file_name,"(compressed)"); // Extract file name
         FILE *dest_file = fopen(file_dest, "wb");
 
         char file_buffer[BUFFER_SIZE];
-        memset(file_buffer, 0, BUFFER_SIZE); 
+        memset(file_buffer, 0, BUFFER_SIZE);
         size_t bytes_received = 0;
         size_t total_byte_received = 0;
-        printf("Before the receiving of the file in client\n");
+        printf("Before receiving the file in client\n");
         while (true)
         {
-            
-            bytes_received = recv(socket, file_buffer, BUFFER_SIZE,0);
-            if (bytes_received < 0)
+            int chuck_size = 0;
+            while(chuck_size < BUFFER_SIZE)
             {
-                perror("Error receiving data");
-                fclose(dest_file);
-                return;
+                bytes_received = recv(socket, file_buffer, BUFFER_SIZE, 0);
+                if((strcmp(file_buffer, "END") == 0))
+                {
+                    break;
+                }
+                if (bytes_received < 0)
+                {
+                    perror("Error receiving data");
+                    fclose(dest_file);
+                    return;
+                }
+
+                   // Write the received contents to the file
+                fwrite(file_buffer, sizeof(char), bytes_received, dest_file);
+                memset(file_buffer, 0, BUFFER_SIZE);  // Clear the buffer
+
+
+                chuck_size += bytes_received;
             }
+            
 
-            total_byte_received += bytes_received;
-            printf("the bytes received : %lu \n",bytes_received);
+            total_byte_received += chuck_size;
+            printf("Bytes received: %i\n", chuck_size);
 
-            int ack_sent = send(socket,"chunk received",14, 0);
-            if (ack_sent < 0)
-            {
+            int ack_sent = send(socket, "chunk received", 14, 0);
+            if (ack_sent < 0) {
                 perror("Error sending ACK");
                 fclose(dest_file);
                 return;
             }
 
-            // Write the received contents to the file
-            fwrite(file_buffer, sizeof(char), bytes_received, dest_file);
-            memset(file_buffer, 0, BUFFER_SIZE);  // Clear the buffer
-
-            if(total_byte_received == file_size )
-            {
-                printf("%s","Insider the terminating condition of client \n");
+         
+            if (total_byte_received == file_size || total_byte_received> file_size) {
+                printf("File download completed.\n");
                 break;
             }
-            else
-            {
-                printf("File size : %lu    Total_Bytes : %lu\n",file_size,total_byte_received);
+            else {
+                printf("File size: %lu    Total_Bytes: %lu\n", file_size, total_byte_received);
             }
+        }
+
+
+        printf("File received.\n");
+
+        fclose(dest_file);
+
+        if (total_byte_received != file_size) {
+            printf("Full file not received.\n");
+        }
+        
+
+        // Now decompressing the file
+
+        char original[256];
+        sprintf(original, "%s%s","/home/ebad/Downloads/down/", file_name);
+
+
+        if(file_type == 1)
+        {
+            printf("it is an image but algorithm is not available\n");
+            // if(decompress_file(file_dest,compressed) == 0)
+            // {
+            //     printf("file decompressed successfully");
+            // }
+            // else
+            // {
+            //      printf("file decompressed problem");
+            // }
+
+            base64_decode_file(file_dest,original);
+            printf("file decompressed successfully\n");
 
            
         }
-        printf("After the receiving of the file in client\n");
-       
-        fclose(dest_file);
-
-        if(total_byte_received != file_size)
+        
+        else if(file_type == 2)
         {
-            printf("Full file is not received :\n");
+            printf("it is an video but algorithm is not available\n");
+            // if(decompress_file(file_dest,compressed) == 0)
+            // {
+            //     printf("file decompressed successfully");
+            // }
+            // else
+            // {
+            //      printf("file decompressed problem");
+            // }
+
+            base64_decode_file(file_dest,original);
+            printf("file decompressed successfully\n");
+
+           
         }
 
-        send(socket,"I downloaded the file \n",20,0);
+        else
+        {
+            // if(decompress_file(file_dest,compressed) == 0)
+            // {
+            //     printf("file decompressed successfully");
+            // }
+            // else
+            // {
+            //      printf("file decompressed problem");
+            // }
 
-        //recv(socket, buffer, sizeof(buffer), 0);
-        printf("File downloaded successfully\n");
-        return;
+            base64_decode_file(file_dest,original);
+            printf("file decompressed successfully\n");
 
+           
+        }
+
+
+       
+        
+        send(socket, "I downloaded the file\n", 22, 0);
+        remove(file_dest);
+        
     }
 
 
