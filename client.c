@@ -6,17 +6,17 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <sys/stat.h>
-#include<stdbool.h>
-#include<magic.h>
-#include<zlib.h>
-#include"encode(compression).h"
+#include <stdbool.h>
+#include <magic.h>
+#include <zlib.h>
+#include "encode-decode.h"
 
 
 
 #define PORT 8080
 #define BUFFER_SIZE 32768 // almost 32kb
 #define SERVER_PORT 8080
-#define CHUNK 131072  // Larger chunk size (256KB)
+
 
 
 // below 3 function tells me which file type(image,video or normal file ) so that I can run the specialized compresssion algorithm
@@ -87,184 +87,6 @@ int file_type(const char* filename)
     }
     
 }
-
-
-
-
-// below is the zlib compression algorithm which works very fine for normal files 
-
-int compress_file(const char *source, const char *destination,size_t* compressed_size)
-{
-    FILE *sourceFile = fopen(source, "rb");
-    if (!sourceFile) {
-        perror("Source file error");
-        return -1;
-    }
-
-    FILE *destFile = fopen(destination, "wb");
-    if (!destFile) {
-        perror("Destination file error");
-        fclose(sourceFile);
-        return -1;
-    }
-
-    unsigned char *in = (unsigned char *)malloc(CHUNK);
-    unsigned char *out = (unsigned char *)malloc(CHUNK);
-    if (in == NULL || out == NULL) {
-        fprintf(stderr, "Memory allocation failed\n");
-        fclose(sourceFile);
-        fclose(destFile);
-        return -1;
-    }
-
-    z_stream strm = {0};
-    if (deflateInit(&strm, Z_DEFAULT_COMPRESSION) != Z_OK) {
-        fprintf(stderr, "deflateInit failed\n");
-        free(in);
-        free(out);
-        fclose(sourceFile);
-        fclose(destFile);
-        return -1;
-    }
-
-    int flush;
-    size_t bytesRead;
-    do {
-        bytesRead = fread(in, 1, CHUNK, sourceFile);
-        if (ferror(sourceFile)) {
-            deflateEnd(&strm);
-            free(in);
-            free(out);
-            fclose(sourceFile);
-            fclose(destFile);
-            return -1;
-        }
-        flush = feof(sourceFile) ? Z_FINISH : Z_NO_FLUSH;
-
-        strm.avail_in = bytesRead;
-        strm.next_in = in;
-
-        do {
-            strm.avail_out = CHUNK;
-            strm.next_out = out;
-            deflate(&strm, flush);
-            size_t bytesWritten = CHUNK - strm.avail_out;
-            fwrite(out, 1, bytesWritten, destFile);
-        } while (strm.avail_out == 0);
-
-    } while (flush != Z_FINISH);
-
-    deflateEnd(&strm);
-    free(in);
-    free(out);
-    fclose(sourceFile);
-
-    // calculating the file size of the compressed file and sends to the main
-    fseek(destFile, 0, SEEK_END);
-    *compressed_size = ftell(destFile);
-    fseek(destFile, 0, SEEK_SET);
-
-
-    fclose(destFile);
-
-    return 0;
-}
-
-
-int decompress_file(const char *source, const char *destination) {
-    FILE *sourceFile = fopen(source, "rb");
-    if (!sourceFile) {
-        perror("Source file error");
-        return -1;
-    }
-
-    FILE *destFile = fopen(destination, "wb");
-    if (!destFile) {
-        perror("Destination file error");
-        fclose(sourceFile);
-        return -1;
-    }
-
-    unsigned char *in = (unsigned char *)malloc(CHUNK);
-    unsigned char *out = (unsigned char *)malloc(CHUNK);
-    if (in == NULL || out == NULL) {
-        fprintf(stderr, "Memory allocation failed\n");
-        fclose(sourceFile);
-        fclose(destFile);
-        return -1;
-    }
-
-    z_stream strm = {0};
-    if (inflateInit(&strm) != Z_OK) {
-        fprintf(stderr, "inflateInit failed\n");
-        free(in);
-        free(out);
-        fclose(sourceFile);
-        fclose(destFile);
-        return -1;
-    }
-
-    int ret;
-    size_t bytesRead;
-    do {
-        bytesRead = fread(in, 1, CHUNK, sourceFile);
-        if (ferror(sourceFile)) {
-            inflateEnd(&strm);
-            free(in);
-            free(out);
-            fclose(sourceFile);
-            fclose(destFile);
-            return -1;
-        }
-
-        strm.avail_in = bytesRead;
-        strm.next_in = in;
-
-        do {
-            strm.avail_out = CHUNK;
-            strm.next_out = out;
-
-            ret = inflate(&strm, Z_NO_FLUSH);
-            if (ret == Z_STREAM_ERROR) {
-                inflateEnd(&strm);
-                free(in);
-                free(out);
-                fclose(sourceFile);
-                fclose(destFile);
-                return -1;
-            }
-
-            if (ret == Z_DATA_ERROR || ret == Z_MEM_ERROR) {
-                fprintf(stderr, "Decompression error: %d\n", ret);
-                inflateEnd(&strm);
-                free(in);
-                free(out);
-                fclose(sourceFile);
-                fclose(destFile);
-                return -1;
-            }
-
-            size_t bytesWritten = CHUNK - strm.avail_out;
-            fwrite(out, 1, bytesWritten, destFile);
-
-        } while (strm.avail_out == 0);
-
-    } while (ret != Z_STREAM_END);
-
-    inflateEnd(&strm);
-    free(in);
-    free(out);
-    fclose(sourceFile);
-    fclose(destFile);
-
-    return ret == Z_STREAM_END ? 0 : -1;
-}
-
-
-
-
-
-
 
 
 
@@ -430,24 +252,33 @@ void handling_command(int socket, const char *command)
         if(type == 1)
         {   
             printf("It is an image but algorithm is not available \n");
-            //compress_file(file_path,compressed_file,&compressed_size);
-            base64_encode_file(file_path,compressed_file,&compressed_size);
-            printf("File compressed successfully.\n");
+            if(compress_file_zlib(file_path,compressed_file,&compressed_size) == 0)
+            {
+                printf("File compressed zlib successfully.\n");  
+            }
+            //base64_encode_file(file_path,compressed_file,&compressed_size);
+            //printf("File compressed successfully.\n");
         }
 
         else if(type == 2)
         {   
             printf("It is a video but algorithm is not available \n");
-            //compress_file(file_path,compressed_file,&compressed_size);
-            base64_encode_file(file_path,compressed_file,&compressed_size);
-            printf("File compressed successfully.\n");
+            if(compress_file_zlib(file_path,compressed_file,&compressed_size) == 0)
+            {
+                printf("File compressed zlib successfully.\n");  
+            }
+            //base64_encode_file(file_path,compressed_file,&compressed_size);
+            //printf("File compressed successfully.\n");
         }
 
         else
         {   
-            //compress_file(file_path,compressed_file,&compressed_size);
-            base64_encode_file(file_path,compressed_file,&compressed_size);
-            printf("File compressed successfully.\n");
+            if(compress_file_zlib(file_path,compressed_file,&compressed_size) == 0)
+            {
+                printf("File compressed zlib successfully.\n");  
+            }
+            //base64_encode_file(file_path,compressed_file,&compressed_size);
+            //printf("File compressed successfully.\n");
         }
 
 
@@ -591,17 +422,17 @@ void handling_command(int socket, const char *command)
         if(file_type == 1)
         {
             printf("it is an image but algorithm is not available\n");
-            // if(decompress_file(file_dest,compressed) == 0)
-            // {
-            //     printf("file decompressed successfully");
-            // }
-            // else
-            // {
-            //      printf("file decompressed problem");
-            // }
+            if(decompress_file_zlib(file_dest,original) == 0)
+            {
+                printf("file decompressed zlib successfully \n");
+            }
+            else
+            {
+                 printf("file decompressed problem \n");
+            }
 
-            base64_decode_file(file_dest,original);
-            printf("file decompressed successfully\n");
+            //base64_decode_file(file_dest,original);
+            //printf("file decompressed successfully\n");
 
            
         }
@@ -609,34 +440,34 @@ void handling_command(int socket, const char *command)
         else if(file_type == 2)
         {
             printf("it is an video but algorithm is not available\n");
-            // if(decompress_file(file_dest,compressed) == 0)
-            // {
-            //     printf("file decompressed successfully");
-            // }
-            // else
-            // {
-            //      printf("file decompressed problem");
-            // }
+            if(decompress_file_zlib(file_dest,original) == 0)
+            {
+                printf("file decompressed zlib successfully \n");
+            }
+            else
+            {
+                printf("file decompressed problem \n");
+            }
 
-            base64_decode_file(file_dest,original);
-            printf("file decompressed successfully\n");
+            //base64_decode_file(file_dest,original);
+            //printf("file decompressed successfully\n");
 
            
         }
 
         else
         {
-            // if(decompress_file(file_dest,compressed) == 0)
-            // {
-            //     printf("file decompressed successfully");
-            // }
-            // else
-            // {
-            //      printf("file decompressed problem");
-            // }
+            if(decompress_file_zlib(file_dest,original) == 0)
+            {
+                printf("file decompressed zlib successfully \n");
+            }
+            else
+            {
+                printf("file decompressed problem \n");
+            }
 
-            base64_decode_file(file_dest,original);
-            printf("file decompressed successfully\n");
+            //base64_decode_file(file_dest,original);
+            //printf("file decompressed successfully\n");
 
            
         }

@@ -3,7 +3,8 @@
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
-#include"encode(compression).h"
+#include<zlib.h>
+#include"encode-decode.h"
 
 static const int mod_table[] = {0, 2, 1};
 
@@ -52,6 +53,7 @@ int write_file(const char *filename, const unsigned char *data, size_t data_size
     return 0;
 }
 
+
 char *base64_encode_chunk(const unsigned char *data, size_t input_length, size_t *output_length) {
     *output_length = 4 * ((input_length + 2) / 3);
 
@@ -80,6 +82,7 @@ char *base64_encode_chunk(const unsigned char *data, size_t input_length, size_t
     encoded_data[*output_length] = '\0';  // Null terminator
     return encoded_data;
 }
+
 
 // Function to read, encode, and write the file in chunks
 int base64_encode_file(const char *input_file, const char *output_file,size_t* compressed_size) {
@@ -149,6 +152,7 @@ size_t base64_decode_chunk(const char *input, size_t input_length, unsigned char
     return output_length;
 }
 
+
 void base64_decode_file(const char *input_filename, const char *output_filename) {
     FILE *input_file = fopen(input_filename, "rb");
     FILE *output_file = fopen(output_filename, "wb");
@@ -176,6 +180,185 @@ void base64_decode_file(const char *input_filename, const char *output_filename)
     fclose(input_file);
     fclose(output_file);
 }
+
+
+
+//below are the compression zlib algorithm which works very fine on normal file :
+// below algorithms are not currently in use but in future I will use them
+
+int compress_file_zlib(const char *source, const char *destination,size_t* compressed_size)
+{
+    FILE *sourceFile = fopen(source, "rb");
+    if (!sourceFile) {
+        perror("Source file error");
+        return -1;
+    }
+
+    FILE *destFile = fopen(destination, "wb");
+    if (!destFile) {
+        perror("Destination file error");
+        fclose(sourceFile);
+        return -1;
+    }
+
+    unsigned char *in = (unsigned char *)malloc(CHUNK);
+    unsigned char *out = (unsigned char *)malloc(CHUNK);
+    if (in == NULL || out == NULL) {
+        fprintf(stderr, "Memory allocation failed\n");
+        fclose(sourceFile);
+        fclose(destFile);
+        return -1;
+    }
+
+    z_stream strm = {0};
+    if (deflateInit(&strm, Z_DEFAULT_COMPRESSION) != Z_OK) {
+        fprintf(stderr, "deflateInit failed\n");
+        free(in);
+        free(out);
+        fclose(sourceFile);
+        fclose(destFile);
+        return -1;
+    }
+
+    int flush;
+    size_t bytesRead;
+    do {
+        bytesRead = fread(in, 1, CHUNK, sourceFile);
+        if (ferror(sourceFile)) {
+            deflateEnd(&strm);
+            free(in);
+            free(out);
+            fclose(sourceFile);
+            fclose(destFile);
+            return -1;
+        }
+        flush = feof(sourceFile) ? Z_FINISH : Z_NO_FLUSH;
+
+        strm.avail_in = bytesRead;
+        strm.next_in = in;
+
+        do {
+            strm.avail_out = CHUNK;
+            strm.next_out = out;
+            deflate(&strm, flush);
+            size_t bytesWritten = CHUNK - strm.avail_out;
+            fwrite(out, 1, bytesWritten, destFile);
+        } while (strm.avail_out == 0);
+
+    } while (flush != Z_FINISH);
+
+    deflateEnd(&strm);
+    free(in);
+    free(out);
+
+    fseek(destFile, 0, SEEK_END);
+    *compressed_size = ftell(destFile);
+    fseek(destFile, 0, SEEK_SET);
+
+
+
+    fclose(sourceFile);
+    fclose(destFile);
+
+
+
+    return 0;
+}
+
+
+int decompress_file_zlib(const char *source, const char *destination)
+{
+    FILE *sourceFile = fopen(source, "rb");
+    if (!sourceFile) {
+        perror("Source file error");
+        return -1;
+    }
+
+    FILE *destFile = fopen(destination, "wb");
+    if (!destFile) {
+        perror("Destination file error");
+        fclose(sourceFile);
+        return -1;
+    }
+
+    unsigned char *in = (unsigned char *)malloc(CHUNK);
+    unsigned char *out = (unsigned char *)malloc(CHUNK);
+    if (in == NULL || out == NULL) {
+        fprintf(stderr, "Memory allocation failed\n");
+        fclose(sourceFile);
+        fclose(destFile);
+        return -1;
+    }
+
+    z_stream strm = {0};
+    if (inflateInit(&strm) != Z_OK) {
+        fprintf(stderr, "inflateInit failed\n");
+        free(in);
+        free(out);
+        fclose(sourceFile);
+        fclose(destFile);
+        return -1;
+    }
+
+    int ret;
+    size_t bytesRead;
+    do {
+        bytesRead = fread(in, 1, CHUNK, sourceFile);
+        if (ferror(sourceFile)) {
+            inflateEnd(&strm);
+            free(in);
+            free(out);
+            fclose(sourceFile);
+            fclose(destFile);
+            return -1;
+        }
+
+        strm.avail_in = bytesRead;
+        strm.next_in = in;
+
+        do {
+            strm.avail_out = CHUNK;
+            strm.next_out = out;
+
+            ret = inflate(&strm, Z_NO_FLUSH);
+            if (ret == Z_STREAM_ERROR) {
+                inflateEnd(&strm);
+                free(in);
+                free(out);
+                fclose(sourceFile);
+                fclose(destFile);
+                return -1;
+            }
+
+            if (ret == Z_DATA_ERROR || ret == Z_MEM_ERROR) {
+                fprintf(stderr, "Decompression error: %d\n", ret);
+                inflateEnd(&strm);
+                free(in);
+                free(out);
+                fclose(sourceFile);
+                fclose(destFile);
+                return -1;
+            }
+
+            size_t bytesWritten = CHUNK - strm.avail_out;
+            fwrite(out, 1, bytesWritten, destFile);
+
+        } while (strm.avail_out == 0);
+
+    } while (ret != Z_STREAM_END);
+
+    inflateEnd(&strm);
+    free(in);
+    free(out);
+    fclose(sourceFile);
+    fclose(destFile);
+
+    return ret == Z_STREAM_END ? 0 : -1;
+}
+
+
+
+
 
 // int main() {
 //     clock_t start = clock();
